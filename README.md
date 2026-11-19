@@ -29,7 +29,7 @@ flowchart LR
     argo[Argo CD] --> kyv{Kyverno<br/>admission}
     kyv -->|signed by CI, hardened| app[secureship pods]
     kyv -. unsigned / latest tag / no limits .-> deny[denied]
-    prom[Prometheus + Grafana] --> app
+    prom[Prometheus + Grafana<br/>optional] -.-> app
   end
 ```
 
@@ -48,7 +48,7 @@ flowchart LR
 | Delivery | Deploy by immutable digest, drift auto-reverted | Argo CD (GitOps) |
 | Admission | Only CI-signed images; digest pinning, limits, non-root, read-only FS | Kyverno |
 | Network | Default-deny NetworkPolicy (HTTP in, DNS out) | Calico |
-| Observability | Request rate, errors, p95 latency, restarts | Prometheus, Grafana |
+| Observability | Request rate, errors, p95 latency, restarts (optional, off on small laptops) | Prometheus, Grafana |
 
 ## Run locally
 
