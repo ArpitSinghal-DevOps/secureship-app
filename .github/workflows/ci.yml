@@ -1,0 +1,160 @@
+name: secure-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege by default; jobs widen only what they need.
+permissions:
+  contents: read
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.76.2
+  GITLEAKS_IMAGE: zricethezav/gitleaks:v8.30.1
+  SEMGREP_IMAGE: semgrep/semgrep:1.186.0
+  SYFT_IMAGE: anchore/syft:v1.57.2
+  ZAP_IMAGE: zaproxy/zap-stable:2.17.0
+
+jobs:
+  secrets:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # scan full history, not just the last commit
+      - run: docker run --rm -v "$PWD:/repo" "$GITLEAKS_IMAGE" git /repo --redact --verbose
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
+            semgrep scan --config p/python --config p/owasp-top-ten --error --metrics=off
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  sca:
+    name: Dependency scan (Trivy fs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          docker run --rm -v "$PWD:/src" "$TRIVY_IMAGE" fs \
+            --scanners vuln,misconfig --severity HIGH,CRITICAL --exit-code 1 /src
+
+  build:
+    name: Build, scan, DAST, push, sign
+    needs: [secrets, sast, test, sca]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to GHCR
+      id-token: write   # OIDC token for keyless Cosign signing
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: |
+          docker build --build-arg APP_VERSION="${GITHUB_SHA::7}" \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            -t "$IMAGE:$GITHUB_SHA" .
+
+      - name: Image scan (Trivy)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" image \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE:$GITHUB_SHA"
+
+      - name: DAST (OWASP ZAP baseline)
+        run: |
+          docker run -d --name app -p 8080:8080 "$IMAGE:$GITHUB_SHA"
+          for i in $(seq 1 30); do curl -sf http://localhost:8080/health && break; sleep 1; done
+          mkdir -p zap && chmod 777 zap
+          docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" "$ZAP_IMAGE" \
+            zap-baseline.py -t http://localhost:8080 -r zap-report.html -J zap-report.json -I
+          # -I: warnings do not fail the build, FAIL-level findings do.
+
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zap-report
+          path: zap/
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        id: push
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push "$IMAGE:$GITHUB_SHA"
+          REF=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$GITHUB_SHA")
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "digest=${REF#*@}" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        if: github.event_name != 'pull_request'
+
+      - name: Sign image (keyless, GitHub OIDC)
+        if: github.event_name != 'pull_request'
+        run: cosign sign --yes "${{ steps.push.outputs.ref }}"
+
+      - name: Generate SBOM (Syft) and attest it
+        if: github.event_name != 'pull_request'
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$SYFT_IMAGE" \
+            "docker:$IMAGE:$GITHUB_SHA" -o spdx-json > sbom.spdx.json
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${{ steps.push.outputs.ref }}"
+
+      - name: Upload SBOM
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom.spdx.json
+
+  update-gitops:
+    name: Promote digest to GitOps repo
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/secureship-gitops
+          # SSH deploy key with write access to secureship-gitops only (least privilege).
+          ssh-key: ${{ secrets.GITOPS_DEPLOY_KEY }}
+      - name: Bump image digest
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          yq -i ".image.digest = strenv(DIGEST)" chart/secureship/values.yaml
+          git config user.name "secureship-ci"
+          git config user.email "secureship-ci@users.noreply.github.com"
+          git commit -am "deploy: secureship-app ${GITHUB_SHA::7} ($DIGEST)"
+          git push
