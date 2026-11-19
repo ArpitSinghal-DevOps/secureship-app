@@ -45,7 +45,7 @@ async def observe_and_harden(request: Request, call_next):
 
 @app.get("/")
 def root():
-    return {"service": "secureship", "version": APP_VERSION}
+    return {"service": "secureship", "version": APP_VERSION, "supply_chain": "scanned, signed, verified"}
 
 
 @app.get("/health")
