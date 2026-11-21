@@ -26,7 +26,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # scan full history, not just the last commit
-      - run: docker run --rm -v "$PWD:/repo" "$GITLEAKS_IMAGE" git /repo --redact --verbose
+      # Scan the full history of the checked-out commit only (not every branch in the repo),
+      # so a finding is reported on the PR that introduced it.
+      - run: docker run --rm -v "$PWD:/repo" "$GITLEAKS_IMAGE" git /repo --redact --verbose --log-opts=HEAD
 
   sast:
     name: SAST (Semgrep)
