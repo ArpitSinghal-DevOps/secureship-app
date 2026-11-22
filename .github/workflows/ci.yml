@@ -7,6 +7,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One run per branch at a time. On main, runs queue in order (a newer push replaces any run still
+# waiting), so an older, slower build can never promote its digest over a newer one.
+# On pull requests, a new push cancels the outdated run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Least privilege by default; jobs widen only what they need.
 permissions:
   contents: read
@@ -65,8 +72,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write   # push to GHCR
-      id-token: write   # OIDC token for keyless Cosign signing
+      packages: write      # push to GHCR
+      id-token: write      # OIDC token for keyless Cosign signing and provenance
+      attestations: write  # store the SLSA provenance attestation
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
@@ -90,7 +98,7 @@ jobs:
       - name: DAST (OWASP ZAP baseline)
         run: |
           docker run -d --name app -p 8080:8080 "$IMAGE:$GITHUB_SHA"
-          for i in $(seq 1 30); do curl -sf http://localhost:8080/health && break; sleep 1; done
+          for _ in $(seq 1 30); do curl -sf http://localhost:8080/health && break; sleep 1; done
           mkdir -p zap && chmod 777 zap
           docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" "$ZAP_IMAGE" \
             zap-baseline.py -t http://localhost:8080 -r zap-report.html -J zap-report.json -I
@@ -134,6 +142,29 @@ jobs:
             "docker:$IMAGE:$GITHUB_SHA" -o spdx-json > sbom.spdx.json
           cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${{ steps.push.outputs.ref }}"
 
+      - name: Attest build provenance (SLSA)
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # Check what the cluster will check, so a bad signature fails here, not at admission.
+      - name: Verify signature, SBOM and provenance
+        if: github.event_name != 'pull_request'
+        env:
+          REF: ${{ steps.push.outputs.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ID="https://github.com/$GITHUB_REPOSITORY/.github/workflows/ci.yml@$GITHUB_REF"
+          ISSUER=https://token.actions.githubusercontent.com
+          cosign verify --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" "$REF" > /dev/null
+          cosign verify-attestation --type spdxjson \
+            --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" "$REF" > /dev/null
+          gh attestation verify "oci://$REF" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml"
+
       - name: Upload SBOM
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -160,4 +191,10 @@ jobs:
           git config user.name "secureship-ci"
           git config user.email "secureship-ci@users.noreply.github.com"
           git commit -am "deploy: secureship-app ${GITHUB_SHA::7} ($DIGEST)"
-          git push
+          # Someone may have pushed to the GitOps repo meanwhile: rebase and retry.
+          for i in 1 2 3; do
+            git push && exit 0
+            sleep $((i * 5))
+            git pull --rebase
+          done
+          exit 1
