@@ -3,7 +3,7 @@ name: secure-ci
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md"] # docs-only commits do not rebuild or redeploy
+    paths-ignore: ["**.md", "docs/**"] # docs-only commits do not rebuild or redeploy
   pull_request:
   workflow_dispatch:
 
