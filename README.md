@@ -19,10 +19,10 @@ flowchart LR
     t[pytest] --> b
     tf[Trivy fs<br/>SCA] --> b
     b[docker build] --> ti[Trivy image] --> zap[OWASP ZAP<br/>DAST] --> push[push to GHCR]
-    push --> sign[Cosign keyless sign] --> sbom[Syft SBOM<br/>+ attestation]
+    push --> sign[Cosign keyless sign] --> sbom[Syft SBOM<br/>+ attestation] --> prov[SLSA provenance]
   end
 
-  sbom -->|commit image digest| gitops[(secureship-gitops<br/>Helm values)]
+  prov -->|commit image digest| gitops[(secureship-gitops<br/>Helm values)]
   gitops -->|poll + sync| argo
 
   subgraph k8s[minikube cluster]
@@ -40,13 +40,14 @@ flowchart LR
 | Source | Secret detection across full git history | Gitleaks |
 | Source | SAST (Python + OWASP Top 10 rules, workflow hardening) | Semgrep |
 | Dependencies | Vulnerable package detection | Trivy fs, Dependabot |
-| Image | OS + library CVE scan, minimal non-root image | Trivy image, multi-stage Dockerfile |
+| Image | OS + library CVE scan, minimal non-root image, base image pinned by digest | Trivy image, multi-stage Dockerfile |
 | Runtime app | Dynamic scan of the running container | OWASP ZAP baseline |
 | Supply chain | Keyless signing bound to this repo's workflow identity | Cosign + Sigstore (GitHub OIDC) |
 | Supply chain | SBOM generated and attested to the image | Syft + Cosign attest |
+| Supply chain | SLSA build provenance attested and pushed to the registry; signature, SBOM and provenance re-verified in CI | GitHub artifact attestations, `gh attestation verify` |
 | Supply chain | Actions pinned to commit SHAs, least-privilege tokens | GitHub Actions |
 | Delivery | Deploy by immutable digest, drift auto-reverted | Argo CD (GitOps) |
-| Admission | Only CI-signed images; digest pinning, limits, non-root, read-only FS | Kyverno |
+| Admission | Only CI-signed images with a CI-attested SBOM, across app, init and ephemeral containers; digest pinning, limits, non-root, read-only FS; no debug containers | Kyverno |
 | Network | Default-deny NetworkPolicy (HTTP in, DNS out) | Calico |
 | Observability | Request rate, errors, p95 latency, restarts (optional, off on small laptops) | Prometheus, Grafana |
 
