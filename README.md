@@ -3,6 +3,8 @@
 A small FastAPI service shipped through a pipeline where **every commit is scanned, every image is
 signed, and the cluster refuses to run anything the pipeline did not sign.**
 
+**Full architecture and step-by-step build guide: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** (diagrams, how each control works, what the security review found).
+
 Deployment config lives in the companion repo
 [secureship-gitops](https://github.com/ArpitSinghal-DevOps/secureship-gitops) (Helm chart, Argo CD apps, Kyverno policies, monitoring).
 
