@@ -188,8 +188,8 @@ jobs:
           DIGEST: ${{ needs.build.outputs.digest }}
         run: |
           yq -i ".image.digest = strenv(DIGEST)" chart/secureship/values.yaml
-          git config user.name "secureship-ci"
-          git config user.email "secureship-ci@users.noreply.github.com"
+          git config user.name "Arpit Singhal"
+          git config user.email "144610884+ArpitSinghal-DevOps@users.noreply.github.com"
           git commit -am "deploy: secureship-app ${GITHUB_SHA::7} ($DIGEST)"
           # Someone may have pushed to the GitOps repo meanwhile: rebase and retry.
           for i in 1 2 3; do
